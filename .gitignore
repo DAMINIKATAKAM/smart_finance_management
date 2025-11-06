@@ -6,8 +6,16 @@ env/
 venv/
 .DS_Store
 *.log
-*.csv
 .vscode/
 .idea/
-transactions_saved.csv
+
+# Ignore all CSVs except transactions_saved.csv
+*.csv
+!transactions_saved.csv
+
+# Ignore virtual environment
 venv/
+
+# Specifically ignore local transaction data
+transactions.csv
+
