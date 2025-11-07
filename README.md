@@ -76,6 +76,7 @@ Your uploaded CSV must include these columns (case-insensitive):
 | Data Processing | Pandas, NumPy |
 | Deployment | Streamlit Cloud / GitHub |
 
+
 ---
 
 ## ⚙️ Installation & Setup
@@ -84,7 +85,6 @@ Your uploaded CSV must include these columns (case-insensitive):
 ```bash
 git clone https://github.com/DAMINIKATAKAM/smart-finance-assistant.git
 cd smart-finance-assistant
-
 
 Example Queries for RAG
 “What were my biggest expenses in food and drink?”
@@ -100,5 +100,6 @@ pip install -r requirements.txt
 
 4️⃣ Run the App
 streamlit run app.py
+
 
 
