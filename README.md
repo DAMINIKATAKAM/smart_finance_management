@@ -91,16 +91,14 @@ Example Queries for RAG
 “What were my biggest expenses in June?”
 “What were my biggest expenses in travel in March?”
 
-### 2️⃣ Create Virtual Environment
-```bash
+2️⃣ Create a Virtual Environment
 python3 -m venv venv
 source venv/bin/activate   # On Windows: venv\Scripts\activate
 
-### 3️⃣ Install Dependencies
-```bash
+3️⃣ Install Dependencies
 pip install -r requirements.txt
 
-### 4️⃣ Run the App
-```bash
-Streamlit run app.py
+4️⃣ Run the App
+streamlit run app.py
+
 
