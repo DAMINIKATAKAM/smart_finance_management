@@ -1,21 +1,19 @@
-# Python & Streamlit ignore
+# Python
 __pycache__/
 *.pyc
-.venv/
-env/
 venv/
+.venv/
+.env
 .DS_Store
-*.log
+
+# Streamlit + caches
+.streamlit/
+.cache/
+
+# Data files (do NOT push personal data)
+transactions_saved.csv
+*.csv
+
+# IDE/editor
 .vscode/
 .idea/
-
-# Ignore all CSVs except transactions_saved.csv
-*.csv
-!transactions_saved.csv
-
-# Ignore virtual environment
-venv/
-
-# Specifically ignore local transaction data
-transactions.csv
-
