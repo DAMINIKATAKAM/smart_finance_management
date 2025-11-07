@@ -1,214 +1,303 @@
+# app.py — Smart Finance Assistant (Final Intelligent Edition)
 import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
 from datetime import date, timedelta
-from sklearn.linear_model import LinearRegression
-import google.generativeai as genai
-import os
+import torch
+import torch.nn as nn
+from sklearn.preprocessing import MinMaxScaler
+from sentence_transformers import SentenceTransformer
+import faiss
+from calendar import month_name
 
-# ------------------ CONFIG ------------------
+# ---------- CONFIG ----------
 st.set_page_config(page_title="Smart Finance Assistant", layout="wide")
-DATA_FILE = "transactions_saved.csv"
+EMB_DIM = 384
 
-# ------------------ LOAD TRANSACTIONS ------------------
-if os.path.exists(DATA_FILE):
+# ---------- UTILITIES ----------
+def make_corpus(df):
+    texts = []
+    for _, r in df.iterrows():
+        date_str = pd.to_datetime(r['Date']).strftime('%Y-%m-%d')
+        texts.append(
+            f"On {date_str}, {r['Type']} of ₹{r['Amount']} in {r['Category']}. "
+            f"Desc: {r['Transaction Description']}"
+        )
+    return texts
+
+# ---------- MODEL: LSTM FORECAST ----------
+class LSTMModel(nn.Module):
+    def __init__(self, input_size=1, hidden_size=50, num_layers=2):
+        super(LSTMModel, self).__init__()
+        self.lstm = nn.LSTM(input_size, hidden_size, num_layers, batch_first=True)
+        self.fc = nn.Linear(hidden_size, 1)
+
+    def forward(self, x):
+        out, _ = self.lstm(x)
+        return self.fc(out[:, -1, :])
+
+def forecast_expenses(expense_df):
+    df = expense_df.groupby(pd.Grouper(key='Date', freq='M'))['Amount'].sum().reset_index()
+    if len(df) < 4:
+        return None, "Need at least 4 months of expense data."
+
+    scaler = MinMaxScaler()
+    scaled = scaler.fit_transform(df['Amount'].values.reshape(-1, 1))
+    X, y = [], []
+    for i in range(3, len(scaled)):
+        X.append(scaled[i-3:i])
+        y.append(scaled[i])
+    X_t = torch.tensor(np.array(X), dtype=torch.float32)
+    y_t = torch.tensor(np.array(y), dtype=torch.float32)
+
+    model = LSTMModel()
+    criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+    for _ in range(100):
+        model.train()
+        optimizer.zero_grad()
+        out = model(X_t)
+        loss = criterion(out, y_t)
+        loss.backward()
+        optimizer.step()
+
+    last_seq = torch.tensor(scaled[-3:].reshape(1, 3, 1), dtype=torch.float32)
+    model.eval()
+    with torch.no_grad():
+        pred = model(last_seq).numpy().flatten()
+    pred_value = scaler.inverse_transform(pred.reshape(-1, 1))[0][0]
+
+    next_month = df['Date'].max() + pd.offsets.MonthBegin(1)
+    df_forecast = pd.concat([df, pd.DataFrame({'Date': [next_month], 'Amount': [pred_value]})])
+    return df_forecast, pred_value
+
+# ---------- RAG ----------
+@st.cache_resource
+def get_embed_model():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+def build_faiss_index(texts):
+    model = get_embed_model()
+    embs = model.encode(texts, convert_to_numpy=True)
+    index = faiss.IndexFlatL2(EMB_DIM)
+    index.add(embs.astype(np.float32))
+    return model, index, embs
+
+def rag_search(query, model, index, texts, k=5):
+    q_emb = model.encode([query], convert_to_numpy=True)
+    D, I = index.search(q_emb.astype(np.float32), k)
+    return [texts[i] for i in I[0]]
+
+# ---------- CSV HANDLER ----------
+def normalize_columns(df):
+    mapping = {
+        "date": "Date",
+        "transaction description": "Transaction Description",
+        "description": "Transaction Description",
+        "details": "Transaction Description",
+        "category": "Category",
+        "amount": "Amount",
+        "value": "Amount",
+        "price": "Amount",
+        "type": "Type",
+        "transaction type": "Type"
+    }
+    new_cols = {}
+    for c in df.columns:
+        clean = c.strip().lower()
+        if clean in mapping:
+            new_cols[c] = mapping[clean]
+    return df.rename(columns=new_cols)
+
+def normalize_dates(df):
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce', dayfirst=False)
+    return df.dropna(subset=['Date'])
+
+# ---------- SIDEBAR ----------
+st.title("💎 Smart Finance Assistant — Final Intelligent Edition")
+
+if "transactions" not in st.session_state:
+    st.session_state.transactions = pd.DataFrame(columns=["Date", "Transaction Description", "Category", "Amount", "Type"])
+
+st.sidebar.header("Upload Transactions (CSV)")
+uploaded_file = st.sidebar.file_uploader("Upload your transactions CSV", type=["csv"])
+
+if uploaded_file:
     try:
-        df = pd.read_csv(DATA_FILE)
-        if 'Date' in df.columns:
-            df['Date'] = pd.to_datetime(df['Date'], format='mixed', errors='coerce')
-            df = df.dropna(subset=['Date'])
+        new_df = pd.read_csv(uploaded_file)
+        new_df = normalize_columns(new_df)
+        new_df = normalize_dates(new_df)
+        required = {"Date", "Transaction Description", "Category", "Amount", "Type"}
+        missing = required - set(new_df.columns)
+        if missing:
+            st.sidebar.error(f"Missing columns: {', '.join(missing)}")
+        else:
+            st.session_state.transactions = new_df.reset_index(drop=True)
+            st.sidebar.success("✅ File uploaded and active for this session.")
+            st.sidebar.dataframe(st.session_state.transactions.head())
     except Exception as e:
-        st.error(f"Error loading saved data: {e}")
-        df = pd.DataFrame(columns=["Date", "Type", "Description", "Category", "Amount"])
-else:
-    df = pd.DataFrame(columns=["Date", "Type", "Description", "Category", "Amount"])
-    df.to_csv(DATA_FILE, index=False)
+        st.sidebar.error(f"Upload error: {e}")
 
-st.session_state.transactions = df.copy()
+df = st.session_state.transactions
+if df.empty:
+    st.info("Upload your transaction CSV to get started.")
+    st.stop()
 
-# ------------------ SIDEBAR ------------------
-st.sidebar.header("User Inputs")
+st.sidebar.header("Financial Inputs")
+income = st.sidebar.number_input("Monthly Income (₹)", min_value=0.0)
+goal = st.sidebar.number_input("Savings Goal (₹)", min_value=0.0)
+deadline = st.sidebar.date_input("Goal Deadline", value=date.today() + timedelta(days=30))
 
-income = st.sidebar.number_input("Monthly Income (₹)", min_value=0.0, step=100.0)
-savings_goal = st.sidebar.number_input("Savings Goal (₹)", min_value=0.0, step=500.0)
-goal_deadline = st.sidebar.date_input("Goal Deadline", value=date.today())
+# ---------- TABS ----------
+tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🔮 Forecast", "💡 Insights", "🧠 RAG Assistant"])
 
-st.sidebar.subheader("Add a Transaction")
-t_date = st.sidebar.date_input("Date", value=date.today())
-t_type = st.sidebar.selectbox("Type", ["Debit (Expense)", "Credit (Income)"])
-t_desc = st.sidebar.text_input("Description")
-t_cat = st.sidebar.selectbox("Category", ["Food", "Transport", "Shopping", "Bills", "Salary", "Other"])
-t_amt = st.sidebar.number_input("Amount (₹)", min_value=0.0, step=100.0)
+# --- TAB 1: Dashboard ---
+with tab1:
+    st.subheader("📊 Expense Dashboard")
 
-# Save transaction
-if st.sidebar.button("Add Transaction"):
-    new_row = pd.DataFrame({
-        "Date": [pd.to_datetime(t_date)],
-        "Type": [t_type],
-        "Description": [t_desc],
-        "Category": [t_cat],
-        "Amount": [t_amt]
-    })
-    st.session_state.transactions = pd.concat([st.session_state.transactions, new_row], ignore_index=True)
-    st.session_state.transactions.to_csv(DATA_FILE, index=False)
-    st.sidebar.success("✅ Transaction Added and Saved!")
+    expense_keywords = ["expense", "debit", "withdrawal", "payment", "spent", "purchase"]
+    expense_df = df[df["Type"].str.lower().str.contains("|".join(expense_keywords), na=False)].copy()
 
-# ------------------ MAIN PANEL ------------------
-st.title("💰 Smart Personal Finance Assistant")
+    if expense_df.empty:
+        st.warning("No expense-type transactions found.")
+    else:
+        expense_df['Month'] = expense_df['Date'].dt.to_period('M').dt.to_timestamp()
+        monthly = expense_df.groupby('Month', as_index=False)['Amount'].sum().sort_values('Month')
+        cat = expense_df.groupby('Category', as_index=False)['Amount'].sum().sort_values('Amount', ascending=False)
 
-# Show transactions
-st.subheader("📋 Your Transactions")
-st.dataframe(st.session_state.transactions)
+        c1, c2 = st.columns(2)
+        with c1:
+            st.plotly_chart(px.bar(monthly, x='Month', y='Amount', title="📅 Monthly Expense Trend", text_auto=".2s"), use_container_width=True)
+        with c2:
+            st.plotly_chart(px.pie(cat, values='Amount', names='Category', title="💸 Category-wise Expense Split"), use_container_width=True)
 
-# ------------------ SPENDING TREND ------------------
-if not st.session_state.transactions.empty:
-    df = st.session_state.transactions.copy()
-    df["Date"] = pd.to_datetime(df["Date"], format='mixed', errors='coerce')
-    df = df.dropna(subset=['Date'])
-    df.sort_values("Date", inplace=True)
+        st.markdown("### 📊 Monthly Expense Breakdown")
+        monthly['Amount'] = monthly['Amount'].map(lambda x: f"₹{x:,.2f}")
+        st.dataframe(monthly)
 
-    expense_df = df[df["Type"].str.lower().str.contains("debit")]
-    if not expense_df.empty:
-        daily_expense = expense_df.groupby("Date")["Amount"].sum().reset_index()
-        recent_expense = daily_expense.tail(25)
+# --- TAB 2: Forecast ---
+with tab2:
+    st.subheader("🔮 Next Month Expense Prediction (LSTM)")
+    fc_df, pred = forecast_expenses(expense_df)
+    if fc_df is None:
+        st.warning(pred)
+    else:
+        st.success(f"Predicted next month's expense: ₹{pred:,.2f}")
+        st.line_chart(fc_df.set_index('Date')['Amount'])
 
-        st.subheader("📊 Daily Spending Trend (Last 25 Days)")
-        fig = px.line(recent_expense, x="Date", y="Amount", title="Spending Over Time", markers=True)
-        st.plotly_chart(fig, use_container_width=True)
+# --- TAB 3: Insights ---
+with tab3:
+    st.subheader("💡 AI-Generated Insights")
 
-        # ------------------ LINEAR REGRESSION PREDICTION ------------------
-        st.subheader("📈 Next Month Expense Prediction (Based on Last 3 Months)")
+    expense_df['Month'] = expense_df['Date'].dt.to_period('M').dt.to_timestamp()
+    monthly_sum = expense_df.groupby('Month', as_index=False)['Amount'].sum().sort_values('Month')
 
-        # Convert to monthly total expenses
-        expense_df["Month"] = expense_df["Date"].dt.to_period("M")
-        monthly_expense = expense_df.groupby("Month")["Amount"].sum().reset_index()
-        monthly_expense["Month"] = monthly_expense["Month"].astype(str)
+    top_spend = expense_df.groupby('Category')['Amount'].sum().sort_values(ascending=False).head(3)
+    st.write(f"💰 **Top Spending Categories:** {', '.join(top_spend.index)}")
 
-        if len(monthly_expense) >= 3:
-            X = np.arange(len(monthly_expense)).reshape(-1, 1)
-            y = monthly_expense["Amount"].values
+    avg_monthly_spend = monthly_sum['Amount'].mean()
+    last_month_spend = monthly_sum.iloc[-1]['Amount'] if not monthly_sum.empty else 0
 
-            model = LinearRegression()
-            model.fit(X, y)
+    st.metric("Average Monthly Spend", f"₹{avg_monthly_spend:,.2f}")
+    st.metric("Last Month’s Total Expenses", f"₹{last_month_spend:,.2f}")
 
-            # Predict next month
-            next_index = np.array([[len(monthly_expense)]])
-            predicted_expense = model.predict(next_index)[0]
+    savings = income - last_month_spend
+    progress = (savings / goal * 100) if goal > 0 else 0
+    progress = max(0, min(progress, 100))
+    st.progress(progress / 100.0)
+    st.caption(f"Savings Goal Progress: {progress:.2f}%")
 
-            next_month = pd.Period(monthly_expense["Month"].iloc[-1], freq="M") + 1
+    if savings < 0:
+        st.warning("⚠️ You’ve spent more than your income this month!")
 
-            # Combine data for visualization
-            future_df = pd.DataFrame({
-                "Month": [next_month.strftime("%Y-%m")],
-                "Predicted Expense": [predicted_expense]
-            })
-            combined_df = pd.concat([monthly_expense, future_df.rename(columns={"Predicted Expense": "Amount"})])
+    st.markdown("### 📆 Recent Monthly Expenses")
+    recent = monthly_sum.tail(6).copy()
+    recent['Amount'] = recent['Amount'].map(lambda x: f"₹{x:,.2f}")
+    st.dataframe(recent)
 
-            # Plot graph
-            fig2 = px.bar(
-                combined_df,
-                x="Month",
-                y="Amount",
-                title="Monthly Expense and Next Month Prediction",
-                color=combined_df["Month"].isin([next_month.strftime("%Y-%m")]),
-                color_discrete_map={True: "orange", False: "blue"}
-            )
-            st.plotly_chart(fig2, use_container_width=True)
+# --- TAB 4: RAG Assistant ---
+with tab4:
+    st.subheader("🧠 Ask Your Finance Assistant")
 
-            st.success(f"📌 Predicted Total Expense for {next_month.strftime('%B %Y')}: ₹{predicted_expense:,.2f}")
+    texts = make_corpus(expense_df)
+    model, index, embs = build_faiss_index(texts)
+    q = st.text_input("Ask anything about your transactions...")
 
+    def detect_month_from_query(query):
+        """Detect month name from user query (e.g. 'June')."""
+        query_lower = query.lower()
+        for m in month_name:
+            if m and m.lower() in query_lower:
+                return m
+        return None
+
+    def local_summary(hits, full_df, user_query):
+        total = 0
+        max_amt = 0
+        max_desc = ""
+        cat = None
+        count = 0
+
+        for t in hits:
+            if "in" in t:
+                possible_cat = t.split("in")[1].split(".")[0].strip()
+                if not cat:
+                    cat = possible_cat
+
+        q_lower = user_query.lower()
+        key_terms = ["food", "drink", "travel", "rent", "shopping", "entertainment", "utilities", "investment", "education"]
+        matched_terms = [term for term in key_terms if term in q_lower]
+
+        detected_month = detect_month_from_query(user_query)
+        if detected_month:
+            month_num = list(month_name).index(detected_month)
+            full_df['MonthNum'] = full_df['Date'].dt.month
+            month_df = full_df[full_df['MonthNum'] == month_num]
         else:
-            st.info("Need at least 3 months of expense data to predict next month’s spending.")
-    else:
-        st.info("No expense transactions yet. Add a Debit transaction from the sidebar.")
+            month_df = full_df.copy()
 
-# ------------------ BUDGET SUMMARY ------------------
-st.subheader("📌 Budget Summary")
-if income > 0 and not st.session_state.transactions.empty:
-    df = st.session_state.transactions
-    expenses = df[df['Type'].str.contains("Debit")]['Amount'].sum()
-    income_vals = df[df['Type'].str.contains("Credit")]['Amount'].sum()
-    avg_expense = expenses / 30 if expenses > 0 else 0
-
-    remaining_balance = income + income_vals - expenses
-    st.metric("Total Expenses", f"₹{expenses:,.2f}")
-    st.metric("Average Daily Expense", f"₹{avg_expense:,.2f}")
-    st.metric("Remaining Balance", f"₹{remaining_balance:,.2f}")
-else:
-    st.info("Enter income and at least one transaction to see budget metrics.")
-
-# ------------------ SAVINGS GOAL ------------------
-st.subheader("🎯 Savings Goal Progress")
-
-if savings_goal > 0 and income > 0:
-    total_income = df[df["Type"].str.contains("Credit")]["Amount"].sum()
-    total_expenses = df[df["Type"].str.contains("Debit")]["Amount"].sum()
-
-    available_balance = income + total_income - total_expenses
-    saved_amount = max(available_balance, 0)
-    progress = min((saved_amount / savings_goal) * 100, 100)
-
-    st.progress(progress / 100)
-    st.metric("Progress", f"{progress:.2f}%")
-    st.metric("Amount Saved", f"₹{saved_amount:,.2f}")
-    st.metric("Amount Remaining", f"₹{max(savings_goal - saved_amount, 0):,.2f}")
-
-    days_left = (goal_deadline - date.today()).days
-    if days_left > 0:
-        daily_saving_needed = max((savings_goal - saved_amount) / days_left, 0)
-        st.info(f"💡 Save ₹{daily_saving_needed:,.2f} per day to reach your goal.")
-    else:
-        st.warning("⚠️ The goal deadline has passed.")
-else:
-    st.info("Enter income and savings goal to track progress.")
-
-# ------------------ ANOMALY DETECTION ------------------
-st.subheader("⚠️ Anomaly Highlights")
-if not st.session_state.transactions.empty:
-    expense_df = df[df["Type"].str.lower().str.contains("debit")]
-    if len(expense_df) > 5:
-        mean_val = expense_df["Amount"].mean()
-        std_val = expense_df["Amount"].std()
-        threshold = mean_val + 2 * std_val
-        anomalies = expense_df[expense_df["Amount"] > threshold]
-
-        if not anomalies.empty:
-            st.warning("🚨 High-spending anomalies detected:")
-            st.dataframe(anomalies)
+        if matched_terms:
+            filter_terms = "|".join(matched_terms)
+            df_filtered = month_df[month_df["Category"].str.lower().str.contains(filter_terms, na=False)]
+        elif cat:
+            df_filtered = month_df[month_df["Category"].str.lower().str.contains(cat.lower(), na=False)]
         else:
-            st.success("✅ No anomalies detected.")
-    else:
-        st.info("Add more transactions for anomaly detection.")
-else:
-    st.info("No data available for anomaly detection.")
+            df_filtered = month_df
 
-# ------------------ GEMINI AI ADVICE ------------------
-st.subheader("🤖 Gemini Financial Advice")
+        if df_filtered.empty:
+            return "No matching transactions found."
 
-api_key = "AIzaSyCBlInGbeaQTkKTPczDH4IF8qIXbC13o3M"  # 🔐 Replace manually
-if api_key.strip() != "":
-    genai.configure(api_key=api_key)
+        # 'Which month had highest spending?'
+        if "which month" in q_lower and "spend" in q_lower:
+            month_totals = full_df.groupby(full_df["Date"].dt.month)["Amount"].sum()
+            best_month = month_totals.idxmax()
+            best_value = month_totals.max()
+            month_name_best = month_name[best_month]
+            return f"📆 Your highest spending month was **{month_name_best}**, with total expenses of ₹{best_value:,.2f}."
 
-    if st.button("💬 Get Advice from Gemini"):
-        try:
-            total_expense = df[df['Type'].str.contains("Debit")]['Amount'].sum()
-            total_income = income + df[df['Type'].str.contains("Credit")]['Amount'].sum()
-            balance = total_income - total_expense
+        total = df_filtered["Amount"].sum()
+        max_row = df_filtered.loc[df_filtered["Amount"].idxmax()]
+        max_amt = max_row["Amount"]
+        max_desc = f"On {max_row['Date'].strftime('%Y-%m-%d')}, Expense of ₹{max_amt:,.2f} in {max_row['Category']}. Desc: {max_row['Transaction Description']}"
 
-            prompt = (
-                f"My total income is ₹{total_income:.2f}, my total expenses are ₹{total_expense:.2f}, "
-                f"and my savings goal is ₹{savings_goal:.2f}. Give me short 4-5 lines of practical budgeting advice."
-            )
+        summary = f"Found {len(df_filtered)} transactions"
+        if matched_terms:
+            summary += f" in {matched_terms[0].capitalize()}"
+        if detected_month:
+            summary += f" during {detected_month}"
+        summary += f".\nTotal spending: ₹{total:,.2f}."
+        summary += f"\nHighest single expense: ₹{max_amt:,.2f}."
+        summary += f"\nTop transaction: {max_desc}"
+        return summary
 
-            model = genai.GenerativeModel("gemini-2.5-flash")
-            response = model.generate_content(prompt)
-            if response and hasattr(response, 'text'):
-                st.info(f"🤖 Gemini says:\n\n{response.text.strip()}")
-            else:
-                st.warning("⚠️ No response received from Gemini.")
-        except Exception as e:
-            st.error(f"⚠️ Gemini API Error: {e}")
-else:
-    st.info("Enter your Gemini API key in the code to enable advice.")
+    if st.button("Ask") and q.strip():
+        hits = rag_search(q, model, index, texts)
+        st.markdown("### 🔍 Retrieved Results")
+        for r in hits:
+            st.write("-", r)
+
+        summary = local_summary(hits, expense_df, q)
+        st.markdown("### 🧾 Summary")
+        st.info(summary)
 
