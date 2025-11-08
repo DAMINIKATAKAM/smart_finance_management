@@ -1,4 +1,4 @@
-# app.py — Smart Finance Assistant (Final Intelligent Edition)
+# app.py — Smart Finance Assistant (Final Intelligent Edition + Gemini 2.5 Flash)
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -14,6 +14,9 @@ from calendar import month_name
 # ---------- CONFIG ----------
 st.set_page_config(page_title="Smart Finance Assistant", layout="wide")
 EMB_DIM = 384
+
+# ---------- GEMINI API KEY ----------
+GEMINI_API_KEY = "AIzaSyCBlInGbeaQTkKTPczDH4IF8qIXbC13o3M"  # 👈 Replace with your Gemini API key inside quotes
 
 # ---------- UTILITIES ----------
 def make_corpus(df):
@@ -150,12 +153,13 @@ goal = st.sidebar.number_input("Savings Goal (₹)", min_value=0.0)
 deadline = st.sidebar.date_input("Goal Deadline", value=date.today() + timedelta(days=30))
 
 # ---------- TABS ----------
-tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "🔮 Forecast", "💡 Insights", "🧠 RAG Assistant"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    "📊 Dashboard", "🔮 Forecast", "💡 Insights", "🧠 RAG Assistant", "🤖 Generative AI"
+])
 
 # --- TAB 1: Dashboard ---
 with tab1:
     st.subheader("📊 Expense Dashboard")
-
     expense_keywords = ["expense", "debit", "withdrawal", "payment", "spent", "purchase"]
     expense_df = df[df["Type"].str.lower().str.contains("|".join(expense_keywords), na=False)].copy()
 
@@ -165,13 +169,11 @@ with tab1:
         expense_df['Month'] = expense_df['Date'].dt.to_period('M').dt.to_timestamp()
         monthly = expense_df.groupby('Month', as_index=False)['Amount'].sum().sort_values('Month')
         cat = expense_df.groupby('Category', as_index=False)['Amount'].sum().sort_values('Amount', ascending=False)
-
         c1, c2 = st.columns(2)
         with c1:
             st.plotly_chart(px.bar(monthly, x='Month', y='Amount', title="📅 Monthly Expense Trend", text_auto=".2s"), use_container_width=True)
         with c2:
             st.plotly_chart(px.pie(cat, values='Amount', names='Category', title="💸 Category-wise Expense Split"), use_container_width=True)
-
         st.markdown("### 📊 Monthly Expense Breakdown")
         monthly['Amount'] = monthly['Amount'].map(lambda x: f"₹{x:,.2f}")
         st.dataframe(monthly)
@@ -189,32 +191,21 @@ with tab2:
 # --- TAB 3: Insights ---
 with tab3:
     st.subheader("💡 AI-Generated Insights")
-
     expense_df['Month'] = expense_df['Date'].dt.to_period('M').dt.to_timestamp()
     monthly_sum = expense_df.groupby('Month', as_index=False)['Amount'].sum().sort_values('Month')
-
     top_spend = expense_df.groupby('Category')['Amount'].sum().sort_values(ascending=False).head(3)
     st.write(f"💰 **Top Spending Categories:** {', '.join(top_spend.index)}")
-
     avg_monthly_spend = monthly_sum['Amount'].mean()
     last_month_spend = monthly_sum.iloc[-1]['Amount'] if not monthly_sum.empty else 0
-
     st.metric("Average Monthly Spend", f"₹{avg_monthly_spend:,.2f}")
     st.metric("Last Month’s Total Expenses", f"₹{last_month_spend:,.2f}")
-
     savings = income - last_month_spend
     progress = (savings / goal * 100) if goal > 0 else 0
     progress = max(0, min(progress, 100))
     st.progress(progress / 100.0)
     st.caption(f"Savings Goal Progress: {progress:.2f}%")
-
     if savings < 0:
         st.warning("⚠️ You’ve spent more than your income this month!")
-
-    st.markdown("### 📆 Recent Monthly Expenses")
-    recent = monthly_sum.tail(6).copy()
-    recent['Amount'] = recent['Amount'].map(lambda x: f"₹{x:,.2f}")
-    st.dataframe(recent)
 
 # --- TAB 4: RAG Assistant ---
 with tab4:
@@ -268,7 +259,6 @@ with tab4:
         if df_filtered.empty:
             return "No matching transactions found."
 
-        # 'Which month had highest spending?'
         if "which month" in q_lower and "spend" in q_lower:
             month_totals = full_df.groupby(full_df["Date"].dt.month)["Amount"].sum()
             best_month = month_totals.idxmax()
@@ -300,4 +290,30 @@ with tab4:
         summary = local_summary(hits, expense_df, q)
         st.markdown("### 🧾 Summary")
         st.info(summary)
+
+# --- TAB 5: Generative AI ---
+with tab5:
+    st.subheader("🤖 Generative AI — Personalized Financial Insights")
+
+    try:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        user_prompt = st.text_area("💬 Ask for budgeting tips, savings advice, or financial insights:")
+        if st.button("Generate Advice", use_container_width=True):
+            if not user_prompt.strip():
+                st.warning("Please enter a valid query.")
+            else:
+                context = (
+                    "You are a smart financial assistant. "
+                    "Provide practical, data-driven, and helpful financial insights, "
+                    "budgeting suggestions, and money-saving tips based on user input."
+                )
+                response = model.generate_content(f"{context}\n\nUser Query: {user_prompt}")
+                st.success("💡 AI-Generated Financial Advice:")
+                st.markdown(response.text.strip())
+
+    except Exception as e:
+        st.error(f"⚠️ Gemini AI Error: {e}")
 
