@@ -16,7 +16,7 @@ st.set_page_config(page_title="Smart Finance Assistant", layout="wide")
 EMB_DIM = 384
 
 # ---------- GEMINI API KEY ----------
-GEMINI_API_KEY = "AIzaSyCBlInGbeaQTkKTPczDH4IF8qIXbC13o3M"  # 👈 Replace with your Gemini API key inside quotes
+GEMINI_API_KEY = "your API key here"  # 👈 Replace with your Gemini API key inside quotes
 
 # ---------- UTILITIES ----------
 def make_corpus(df):
